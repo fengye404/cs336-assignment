@@ -42,6 +42,24 @@ When a student asks for help:
 5. **Explain the "why"** behind suggestions, not just the "how".
 6. **Prefer tests and invariants** over fixes. For example, suggest shape assertions, tiny toy inputs, profiler checks, or ablations.
 
+## Local Compute Environment
+
+When working from the user's local LAN, a Windows PC can be used as a remote GPU machine for environment checks, profiling, and user-approved training runs.
+
+Known setup:
+
+* SSH alias from the Mac: `summerpc`
+* Windows host: `summerPC`
+* LAN IPv4: `192.168.31.234`
+* WSL distro: `Ubuntu`
+* GPU: NVIDIA GeForce RTX 4080 SUPER
+* GPU check command:
+  ```bash
+  ssh summerpc "wsl -d Ubuntu -e /usr/lib/wsl/lib/nvidia-smi"
+  ```
+
+This remote GPU access is for infrastructure and experimentation support only. It does not change the academic-integrity rules above: do not use the GPU machine to generate assignment solutions, complete TODOs, or bypass the teaching-assistant role.
+
 ## Example Interactions
 
 **Good:**
