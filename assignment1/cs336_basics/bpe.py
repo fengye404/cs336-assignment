@@ -11,32 +11,31 @@ def train_bpe(input_path, vocab_size, special_tokens):
     text = corpus.decode("utf-8")
 
     # special token 是文档边界：不把它的内部字符交给预分词或 BPE 统计。
-    # spilt_list 中的每项都是一段不含 special token 的普通文本。
+    # 这里先按照 special 把原始文本分开成 spilt list
     spilt_list = []
     if len(special_tokens) == 0:
         spilt_list.append(text)
     else:
         special_token_pattern = "|".join([regex.escape(special) for special in special_tokens])
         spilt_list = regex.split(special_token_pattern, text)
-    # 对每段普通文本应用课程给定的预分词正则；extend 会把每段的结果平铺
-    # 到同一个列表中，而不会形成「列表套列表」。
+    # 再对拆开来的每一项，按照作业里面的预分词器（实际上就是一段正则）进行预分词
+    # 为什么要预分词，可以看这个：https://zhuanlan.zhihu.com/p/692508797
     all_pretokens = []
     for spilt in spilt_list:
         all_pretokens.extend(regex.findall(PATTERN, spilt))
-    # 原始 pre-token 频率表，例如 "low" -> 5。
-    # 这张表表示语料本身的统计，在后续 BPE merge 中不再修改。
+    # 先统计下预分词后，每个词的频率，例如 "low" -> 5。
     pretoken_text_counts = Counter(all_pretokens)
 
-    # 将每个 pre-token 编为 UTF-8 bytes，并从单 byte token 开始切分。
-    # token_sequence_counts 是训练中的可变状态：
-    #   (b"l", b"o", b"w") -> 5
-    # key 是当前 token 序列，value 是该 pre-token 在语料中的出现次数。
+    # 将每个 pre-token 从字符串转为 utf-8 的 bytes，例如 "low"-> b"low"
+    # 然后再拆成独立的
+    # token_sequence_counts 里面的内容：(b"l", b"o", b"w") -> 5
     token_sequence_counts = {}
     for key, value in pretoken_text_counts.items():
         raw_bytes = key.encode("utf-8")
         bytes_tokens = []
-        for byte in raw_bytes:
-            bytes_tokens.append(bytes([byte]))
+        # bytes 实际上是 int 的数组，所以这里取出来的是 int，还需要手动创建一个 bytes
+        for byte_int in raw_bytes:
+            bytes_tokens.append(bytes([byte_int]))
         token_sequence_counts[tuple(bytes_tokens)] = value
 
     # 初始词表包含全部 256 个可能的单 byte 值。
