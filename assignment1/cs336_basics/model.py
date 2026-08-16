@@ -75,3 +75,44 @@ class Embedding(torch.nn.Module):
     # 实际上 python 中 A[B] 等价于 A.__getitem__(B)
     def forward(self, token_ids: torch.Tensor) -> torch.Tensor:
         return self.embedding[token_ids]
+
+# RMSNorm 公式：output = (x / sqrt(mean(x²) + eps)) × weight
+class RMSNorm(torch.nn.Module):
+    def __init__(self, d_model: int, eps: float = 1e-5, device=None, dtype=None):
+        super().__init__()
+        
+        # d_model 模型 token 维度；weight 用于最后做缩放，维度要和 d_model 一致
+        # eps 用于防止分母为 0
+        
+        self.weight = torch.nn.Parameter(
+            torch.ones(
+                d_model,
+                device = device,
+                dtype = dtype
+            )
+        )
+        self.eps = eps
+        pass
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # 按照 pdf 的要求，入参 x 需要先转到 32 位
+        in_dtype = x.dtype
+        x_float32 = x.to(torch.float32)
+        
+        # 应用公式
+        # 注意 mean 只需要对最后维度求平均，keepdim 表示需要保留维度，这里 mean 后的 shape 就是 (batch, seq_len, 1)
+        rms = torch.sqrt(
+            torch.mean(
+                torch.square(x_float32), 
+                dim = -1,
+                keepdim = True
+            ) + self.eps
+        )
+        # 注意这里是 * weight 而不是 @，因为是逐元素相乘缩放
+        # 这里计算需要注意一下 shape
+        # x_floagt32(batch, seq_len, d_model)，rms(batch, seq_len, 1)
+        # x_floagt32/rms 这里会用到 pytorch 里面的广播机制
+        # 广播：两个 shape 不完全一样的 tensor 做逐元素运算时，PyTorch 会在尺寸为 1 的维度上，自动“重复使用”那个值，让 shape 对齐。
+        result = (x_float32 / rms) * self.weight
+        
+        # 返回前转回原来的 dtype
+        return result.to(in_dtype) 
