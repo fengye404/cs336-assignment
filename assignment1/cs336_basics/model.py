@@ -116,3 +116,12 @@ class RMSNorm(torch.nn.Module):
         
         # 返回前转回原来的 dtype
         return result.to(in_dtype) 
+    
+    
+# silu 公式：SiLU(x) = x × sigmoid(x)
+# sigmoid(x) = 1 / (1 + e⁻ˣ)
+def silu(in_features: torch.Tensor):
+    return in_features * torch.sigmoid(in_features)
+
+class SwiGLU(torch.nn.Module):
+    pass
