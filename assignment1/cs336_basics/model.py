@@ -123,5 +123,29 @@ class RMSNorm(torch.nn.Module):
 def silu(in_features: torch.Tensor):
     return in_features * torch.sigmoid(in_features)
 
+# SwiGLU 相比于通常的 FNN，实际上就是加了一层 gate 门控分支
+# FNN：x -> Linear W1（通常维度扩大 4 倍） -> ReLU -> Linear W2（缩小四倍） -> 输出
+#
+# SwiGLU：
+# x (d_model) -> Linear W1 (d_model -> d_ff) -> SiLU ─┐
+#                                                   × -> Linear W2 (d_ff → d_model) → 输出
+# x (d_model) -> Linear W3 (d_model -> d_ff)  ────────┘
+# 公式：SwiGLU(𝑥, 𝑊1, 𝑊2, 𝑊3) = 𝑊2(SiLU(𝑊1𝑥) ⊙ 𝑊3𝑥)   ⊙表示逐元素相乘
 class SwiGLU(torch.nn.Module):
-    pass
+    def __init__(self, d_model: int, d_ff: int, device=None, dtype=None):
+        super().__init__()
+        self.d_model = d_model
+        self.d_ff = d_ff
+        
+        # w1、w3 负责升维
+        self.w1 = Linear(d_model,d_ff,device,dtype)
+        self.w3 = Linear(d_model,d_ff,device,dtype)
+        
+        # w2 负责降维
+        self.w2 = Linear(d_ff,d_model,device,dtype)
+        
+    def forward(self, x: torch.Tensor):
+        a = silu(self.w1(x)) 
+        b = self.w3(x)
+        # 注意这里是是逐元素相乘
+        return self.w2(a * b)
