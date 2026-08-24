@@ -189,10 +189,16 @@ class SwiGLU(torch.nn.Module):
 #    (q0,q1) 按 n × f1 旋转
 #    (q2,q3) 按 n × f2 旋转
 #    (q4,q5) 按 n × f3 旋转
+#   
+#    每一对维度旋转频率
 #    f_k = 1 / theta^((2k - 2) / d_k)
+#    第 k 对维度、位于位置 n 的 token 的旋转角度为：
+#    angle[n, k] = n × f_k
+#                = n / theta^((2k - 2) / d_k)
 #
 #    不同维度对的频率 f1、f2、f3 不同，
 #    因此同一个 q/k 向量中的不同维度对，旋转角度通常也不同
+#    这是为了让一个 token 中不同的维度可以以不同的方式去记录位置信息
 #
 # 3、q、k 的对应维度对，会按相同的位置 n 和相同频率旋转
 #    得到旋转后的 q_rotated、k_rotated；它们的 shape 不变
@@ -206,11 +212,78 @@ class SwiGLU(torch.nn.Module):
 #
 #    因此不同 token 的 q、k 点积不仅和内容有关，
 #    还会受到两者相对位置距离的影响
+# 
+# 
+# 对于单个二维向量 (a, b)，假设旋转角度为 alpha，
+# 数学上的二维旋转矩阵为：
+#
+# R(alpha) = [[cos(alpha), -sin(alpha)],
+#             [sin(alpha),  cos(alpha)]]
+#
+# 旋转结果为：
+# [a', b'] = [a × cos(alpha) - b × sin(alpha),
+#             a × sin(alpha) + b × cos(alpha)]
+#
+# 对于整个 q/k 向量，数学上可以把所有二维旋转矩阵沿对角线拼起来，
+# 形成一个 d_k × d_k 的分块对角矩阵：
+#
+# R = [[R1,  0,  0],
+#      [ 0, R2,  0],
+#      [ 0,  0, R3]]
+#
+# 但是代码中一般不直接构造这个 d_k × d_k 的旋转矩阵：
+# 1、矩阵中绝大多数位置都是 0，存储浪费
+# 2、矩阵乘法会做很多和 0 相乘的无用计算
+#
+# 工程上使用与旋转矩阵完全等价的逐元素计算：
+# rotated_q = q ⊙ cos_table + rotate_half(q) ⊙ sin_table
+#
+# 其中 ⊙ 表示逐元素相乘；
+# cos_table / sin_table 为每对维度预先计算好的 cos / sin 值，
+# 同一对维度会重复使用相同的 cos / sin。
+#
+# 例如：
+# q = [q0, q1, q2, q3, q4, q5]
+#
+# rotate_half(q) = [-q1, q0, -q3, q2, -q5, q4]
+#
+# cos_table = [cos(n×f1), cos(n×f1),
+#              cos(n×f2), cos(n×f2),
+#              cos(n×f3), cos(n×f3)]
+#
+# sin_table = [sin(n×f1), sin(n×f1),
+#              sin(n×f2), sin(n×f2),
+#              sin(n×f3), sin(n×f3)]
+#
+# 最终得到的结果，和用完整分块对角矩阵 R 乘 q 完全相同，
+# 但只需要进行逐元素运算，更适合 GPU 并行计算。
 class RotaryPositionalEmbedding(torch.nn.Module):
     def __init__(self, theta: float, d_k: int, max_seq_len: int, device=None):
         # theta：RoPE 的频率基数
+        # d_k：q、k 向量维度
+        # max_seq_len：最大 token 长度
+        super().__init__()
+        self.d_k = d_k
         
-        pass
+        # 先计算每个位置需要旋转的角度
+        # 公式：f_k = 1 / theta^((2k - 2) / d_k)
+        # arange(0, d_k, 2) 产生 [0, 2, 4, ..., d_k-2]，对应公式中的2k-2(k从1开始)
+        f_k = theta ** torch.arange(0, d_k, 2, device).float() / d_k
+        # 这里要用外积，angle 是一个矩阵
+        # angle[n, k] = n × f_k = n / theta^((2k - 2) / d_k)
+        angle = torch.outer(torch.arange(max_seq_len, device).float(), f_k)
+        
+        self.register_buffer("cos_table", angle.cos())
+        self.register_buffer("sin_table", angle.sin())
     
     def forward(self, x: torch.Tensor, token_positions: torch.Tensor) -> torch.Tensor:
+        # x：输入的一批 q 向量或 k 向量
+        # token_positions：x 中每个 q/k 向量对应 token 在序列中的位置下标
+        
+        cos = self.cos_table(token_positions)
+        sin = self.sin_table(token_positions)
+        
+        # 公式：rotated_q = q ⊙ cos_table + rotate_half(q) ⊙ sin_table
+        # rotate_half：[x0, x1, x2, x3, ...] → [-x1, x0, -x3, x2, ...]
+        
         pass
