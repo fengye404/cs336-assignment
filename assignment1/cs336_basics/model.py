@@ -270,11 +270,11 @@ class RotaryPositionalEmbedding(torch.nn.Module):
         # 公式：f_k = 1 / theta^((2k - 2) / d_k)
         # arange(0, d_k, 2) 产生 [0, 2, 4, ..., d_k-2]，对应公式中的2k-2(k从1开始)
         # 注意这里 f_k 的 shape 是 (d_k / 2,)
-        f_k = theta ** torch.arange(0, d_k, 2, device).float() / d_k
+        f_k = 1 / (theta ** (torch.arange(0, d_k, 2, device=device).float() / d_k))
         # 这里要用外积，外积的结果是前行后列，angle 是一个矩阵
         # angle[n, k] = n × f_k = n / theta^((2k - 2) / d_k)
         # angle 的shape：(max_seq_len, d_k / 2)
-        angle = torch.outer(torch.arange(max_seq_len, device).float(), f_k)
+        angle = torch.outer(torch.arange(max_seq_len, device=device).float(), f_k)
         
         # cos_table、sin_table shape 都是 (max_seq_len, d_k / 2)
         self.register_buffer("cos_table", angle.cos())
@@ -284,14 +284,69 @@ class RotaryPositionalEmbedding(torch.nn.Module):
         # x：shape 为 (..., seq_len, d_k) 的 q 或 k 向量
         # token_positions：shape 为 (..., seq_len) 的整数位置下标；每个位置对应 x 中一个 q/k 向量所在的 token 位置。
         
-        # 这里 cos 和 sin 的 shape 都是 token_positions.shape + (d_k // 2,)
-        cos_value = self.cos_table(token_positions)
-        sin_value = self.sin_table(token_positions)
+        # 这里 cos 和 sin 的 shape 都是 token_positions.shape + (d_k // 2,)，得用 repeat_interleave 复制一下元素
+        cos_value = self.cos_table[token_positions].repeat_interleave(2, dim=-1)
+        sin_value = self.sin_table[token_positions].repeat_interleave(2, dim=-1)
         
         # 公式：rotated_q = q ⊙ cos_value + rotate_half(q) ⊙ sin_value
         # rotate_half：[x0, x1, x2, x3, ...] → [-x1, x0, -x3, x2, ...]
         
-        pass
+        """
+        最后一维两两拆分，例如：
+        原来 (3, 6)：
+        [
+            [ 1,  2,  3,  4,  5,  6],
+            [ 7,  8,  9, 10, 11, 12],
+            [13, 14, 15, 16, 17, 18],
+        ]
+
+        现在 (3, 3, 2)：
+        [
+            [ [1, 2],  [3, 4],  [5, 6] ],      ← 第 0 个 token，3 组，每组 2 个
+            [ [7, 8],  [9,10],  [11,12] ],     ← 第 1 个 token
+            [ [13,14], [15,16], [17,18] ],     ← 第 2 个 token
+        ]
+        """
+        x_unflatten = x.unflatten(-1,(-1,2))
+        
+        """
+        按照奇偶拆分开
+        even = 每组的第 0 个元素：
+        [
+            [ 1,  3,  5],
+            [ 7,  9, 11],
+            [13, 15, 17],
+        ]
+        odd = 每组的第 1 个元素：
+        [
+            [ 2,  4,  6],
+            [ 8, 10, 12],
+            [14, 16, 18],
+        ]
+        """
+        even, odd = x_unflatten.unbind(-1)
+        
+        """
+        先奇偶互换，然后压缩最后两维
+        stack 后的结果：
+        [
+            [ [-2,  1], [-4,  3], [ -6,  5] ],     ← 第 0 个 token
+            [ [-8,  7], [-10, 9], [-12, 11] ],     ← 第 1 个 token
+            [ [-14,13], [-16,15], [-18, 17] ],     ← 第 2 个 token
+        ]
+        flatten 后：
+        [
+            [ -2,  1,  -4,   3,  -6,   5],
+            [ -8,  7, -10,   9, -12,  11],
+            [-14, 13, -16,  15, -18,  17],
+        ]
+        
+        """
+        x_rotate_half = torch.stack((-odd, even), dim = -1).flatten(-2)
+        
+        rotated_x = x * cos_value + x_rotate_half * sin_value
+        
+        return rotated_x
     
 # softmax(v)[i] = e^(v[i]) / (e^(v[0]) + e^(v[1]) + ... + e^(v[n - 1]))
 def softmax(x: torch.Tensor, dim: int):
