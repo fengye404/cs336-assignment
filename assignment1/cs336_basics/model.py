@@ -1,4 +1,5 @@
 import torch
+import math
 
 # Linear 实际上就是内部维护了一个可训练的权重 tensor（cs336 作业中不包含 bias 偏置）
 # 输入 tensor 经过权重 tensor 向量计算后，输出一个新的 tensor
@@ -236,10 +237,10 @@ class SwiGLU(torch.nn.Module):
 # 2、矩阵乘法会做很多和 0 相乘的无用计算
 #
 # 工程上使用与旋转矩阵完全等价的逐元素计算：
-# rotated_q = q ⊙ cos_table + rotate_half(q) ⊙ sin_table
+# rotated_q = q ⊙ cos_value + rotate_half(q) ⊙ sin_value
 #
 # 其中 ⊙ 表示逐元素相乘；
-# cos_table / sin_table 为每对维度预先计算好的 cos / sin 值，
+# cos_value / sin_value 为每对维度预先计算好的 cos / sin 值，
 # 同一对维度会重复使用相同的 cos / sin。
 #
 # 例如：
@@ -247,11 +248,11 @@ class SwiGLU(torch.nn.Module):
 #
 # rotate_half(q) = [-q1, q0, -q3, q2, -q5, q4]
 #
-# cos_table = [cos(n×f1), cos(n×f1),
+# cos_value = [cos(n×f1), cos(n×f1),
 #              cos(n×f2), cos(n×f2),
 #              cos(n×f3), cos(n×f3)]
 #
-# sin_table = [sin(n×f1), sin(n×f1),
+# sin_value = [sin(n×f1), sin(n×f1),
 #              sin(n×f2), sin(n×f2),
 #              sin(n×f3), sin(n×f3)]
 #
@@ -268,22 +269,78 @@ class RotaryPositionalEmbedding(torch.nn.Module):
         # 先计算每个位置需要旋转的角度
         # 公式：f_k = 1 / theta^((2k - 2) / d_k)
         # arange(0, d_k, 2) 产生 [0, 2, 4, ..., d_k-2]，对应公式中的2k-2(k从1开始)
+        # 注意这里 f_k 的 shape 是 (d_k / 2,)
         f_k = theta ** torch.arange(0, d_k, 2, device).float() / d_k
-        # 这里要用外积，angle 是一个矩阵
+        # 这里要用外积，外积的结果是前行后列，angle 是一个矩阵
         # angle[n, k] = n × f_k = n / theta^((2k - 2) / d_k)
+        # angle 的shape：(max_seq_len, d_k / 2)
         angle = torch.outer(torch.arange(max_seq_len, device).float(), f_k)
         
+        # cos_table、sin_table shape 都是 (max_seq_len, d_k / 2)
         self.register_buffer("cos_table", angle.cos())
         self.register_buffer("sin_table", angle.sin())
     
     def forward(self, x: torch.Tensor, token_positions: torch.Tensor) -> torch.Tensor:
-        # x：输入的一批 q 向量或 k 向量
-        # token_positions：x 中每个 q/k 向量对应 token 在序列中的位置下标
+        # x：shape 为 (..., seq_len, d_k) 的 q 或 k 向量
+        # token_positions：shape 为 (..., seq_len) 的整数位置下标；每个位置对应 x 中一个 q/k 向量所在的 token 位置。
         
-        cos = self.cos_table(token_positions)
-        sin = self.sin_table(token_positions)
+        # 这里 cos 和 sin 的 shape 都是 token_positions.shape + (d_k // 2,)
+        cos_value = self.cos_table(token_positions)
+        sin_value = self.sin_table(token_positions)
         
-        # 公式：rotated_q = q ⊙ cos_table + rotate_half(q) ⊙ sin_table
+        # 公式：rotated_q = q ⊙ cos_value + rotate_half(q) ⊙ sin_value
         # rotate_half：[x0, x1, x2, x3, ...] → [-x1, x0, -x3, x2, ...]
         
+        pass
+    
+# softmax(v)[i] = e^(v[i]) / (e^(v[0]) + e^(v[1]) + ... + e^(v[n - 1]))
+def softmax(x: torch.Tensor, dim: int):
+    # 因为 exp 是指数函数，如果 x 过大可能会导致溢出，而 softmax 实际上只关心每个 x 的差值，不关心具体的绝对值，所以先全都减掉 x 的最大值
+    x = x - x.max(dim = dim, keepdim = True).values
+    exp_x = torch.exp(x)
+    return exp_x / exp_x.sum(dim = dim,keepdim = True)
+
+# Attention(Q, K, V) = softmax(QK^T / √d_k) V
+def scaled_dot_product_attention(
+    Q: torch.Tensor,
+    K: torch.Tensor,
+    V: torch.Tensor,
+    mask: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """
+    参数：
+        Q: [..., n, d_k]   （n 为 Query 序列长度）
+        K: [..., m, d_k]   （m 为 Key 序列长度）
+        V: [..., m, d_v]
+        mask: [n, m] 布尔矩阵，True 为保留，False 为屏蔽
+
+    返回：
+        [..., n, d_v] 与输入 batch 维一致的张量
+    """
+    # 先获取 K 向量维度
+    d_k = K.size(-1)
+    
+    # 计算 Q K 向量的分数，并除以 √d_k 进行缩放
+    socres = (Q @ K.mT) / math.sqrt(d_k)
+    
+    """
+    Masked Scores = [[10, -inf, -inf],
+                     [ 5,  10, -inf],
+                     [ 2,   8,  10]]
+
+        => softmax => [[1.0, 0.0, 0.0],
+                       [0.3, 0.7, 0.0],
+                       [0.1, 0.4, 0.5]]
+    """
+    if mask is not None:
+        # mask 为 flase的地方设为负无穷
+        socres = socres.masked_fill(mask == False, float('-inf'))
+        
+    socres = softmax(socres, dim = -1)
+    
+    return socres @ V
+
+
+class MultiheadSelfAttention(torch.nn.Module):
+    def __init__(self, theta: float, d_k: int, max_seq_len: int, device=None):
         pass
