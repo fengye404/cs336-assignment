@@ -397,5 +397,63 @@ def scaled_dot_product_attention(
 
 
 class MultiheadSelfAttention(torch.nn.Module):
-    def __init__(self, theta: float, d_k: int, max_seq_len: int, device=None):
-        pass
+    def __init__(self, d_model: int, num_heads: int, theta=None, max_seq_len=None, device=None, dtype=None):
+        super().__init__()
+        
+        # 要用 head 数量均分 d_model，所以需要校验能否整除
+        assert d_model % num_heads == 0
+        
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.head_dim = d_model // num_heads
+        
+        # 先定义获取 QKV 向量的 Linear
+        self.W_Q = Linear(in_features=d_model, out_features=d_model, device=device, dtype=dtype)
+        self.W_K = Linear(in_features=d_model, out_features=d_model, device=device, dtype=dtype)
+        self.W_V = Linear(in_features=d_model, out_features=d_model, device=device, dtype=dtype)
+        
+        # 输出经过 QKV 运算后需要再过一次 Linear
+        self.out_proj = Linear(in_features=d_model, out_features=d_model, device=device)
+        
+        # 如果传入了 theta 和 max_seq_len，则处理 rope 的逻辑
+        if theta is not None and max_seq_len is not None:
+            self.rope = RotaryPositionalEmbedding(theta=theta, d_k=self.head_dim, max_seq_len=max_seq_len)
+        else:
+            self.rope = None
+        
+    def forward(self, x: torch.Tensor, token_position=None):
+        # 先计算出完整的 QKV，再按照 head 拆分
+        q = self.W_Q(x)
+        k = self.W_K(x)
+        v = self.W_V(x)
+        
+        # 拆分后的多头 QKV 的 shape：(batch_size, num_heads, seq_len, head_dim)
+        # 这里 view 拆分需要先拆 qkv 的最后维度，所以前两维 shape 要展示保持 batch_size, seq_len，通过 transpose 处理成最终的 shape
+        batch_size, seq_len, d_model = x.shape
+        q = q.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        k = k.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        v = v.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        
+        # 如果 rope 不为 null 就对 q、k 进行 rope 计算
+        if self.rope is not None:
+            # token_position shape：(batch_size, seq_len)
+            if token_position is None:
+                token_position = torch.arange(seq_len, device=x.device).expand(batch_size, seq_len)
+            q=self.rope(q, token_position)
+            k=self.rope(k, token_position)
+        
+        # 这里需要一个下三角矩阵
+        """
+        True  False False False
+        True  True  False False
+        True  True  True  False
+        True  True  True  True
+        """
+        mask = torch.tril(torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool))
+        
+        # 计算注意力
+        out = scaled_dot_product_attention(Q=q,K=k,V=v,mask=mask)
+        
+        # 把 heads 维度拼回 d_model，恢复 (batch_size, seq_len, d_model)。
+        out = out.transpose(1, 2).contiguous().view(batch_size, seq_len, self.d_model)
+        return self.out_proj(out)
