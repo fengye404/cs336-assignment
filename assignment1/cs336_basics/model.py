@@ -134,6 +134,8 @@ def silu(in_features: torch.Tensor):
 # 公式：SwiGLU(𝑥, 𝑊1, 𝑊2, 𝑊3) = 𝑊2(SiLU(𝑊1𝑥) ⊙ 𝑊3𝑥)   ⊙表示逐元素相乘
 class SwiGLU(torch.nn.Module):
     def __init__(self, d_model: int, d_ff: int, device=None, dtype=None):
+        # d_ff：隐藏层的维度
+        
         super().__init__()
         self.d_model = d_model
         self.d_ff = d_ff
@@ -421,7 +423,7 @@ class MultiheadSelfAttention(torch.nn.Module):
         else:
             self.rope = None
         
-    def forward(self, x: torch.Tensor, token_position=None):
+    def forward(self, x: torch.Tensor, token_positions=None):
         # 先计算出完整的 QKV，再按照 head 拆分
         q = self.W_Q(x)
         k = self.W_K(x)
@@ -436,11 +438,11 @@ class MultiheadSelfAttention(torch.nn.Module):
         
         # 如果 rope 不为 null 就对 q、k 进行 rope 计算
         if self.rope is not None:
-            # token_position shape：(batch_size, seq_len)
-            if token_position is None:
-                token_position = torch.arange(seq_len, device=x.device).expand(batch_size, seq_len)
-            q=self.rope(q, token_position)
-            k=self.rope(k, token_position)
+            # token_positions shape：(batch_size, seq_len)
+            if token_positions is None:
+                token_positions = torch.arange(seq_len, device=x.device).expand(batch_size, seq_len)
+            q=self.rope(q, token_positions)
+            k=self.rope(k, token_positions)
         
         # 这里需要一个下三角矩阵
         """
@@ -457,3 +459,36 @@ class MultiheadSelfAttention(torch.nn.Module):
         # 把 heads 维度拼回 d_model，恢复 (batch_size, seq_len, d_model)。
         out = out.transpose(1, 2).contiguous().view(batch_size, seq_len, self.d_model)
         return self.out_proj(out)
+
+
+# transformer block 公式：𝑦 = 𝑥 + MultiHeadSelfAttention(RMSNorm(𝑥)). 
+# 一个 transformer block 可以分为两个子层，一个用于多头注意力（简写为 MHA），一个用于SwiGLU的 FNN（简写 FF）
+# 在每个子层中，会先用 RMSNorm 进行归一化，再进行 MHA/FF，再进行残差连接
+class TransformerBlock(torch.nn.Module):
+    def __init__(self, d_model: int, num_heads: int, d_ff: int, theta=None, max_seq_len=None, device=None, dtype=None):
+        super().__init__()
+        
+        # 初始化 MHA
+        self.attention = MultiheadSelfAttention(
+            d_model=d_model, 
+            num_heads=num_heads, 
+            theta=theta, 
+            max_seq_len=max_seq_len,
+            device=device,
+            dtype=dtype
+        )
+        
+        # 初始化 FF
+        self.ffn = SwiGLU(d_model=d_model, d_ff=d_ff, device=device, dtype=dtype)
+        
+        # 初始化两个 RMSNorm，分别用于 MHA、FF
+        self.norm1 = RMSNorm(d_model=d_model, device=device, dtype=dtype)
+        self.norm2 = RMSNorm(d_model=d_model, device=device, dtype=dtype)
+    
+    def forward(self, x: torch.Tensor, token_positions: torch.Tensor = None):
+        # 先进行 MHA 操作
+        x = x + self.attention(x=self.norm1(x), token_positions=token_positions)
+        # 再进行 FF 操作
+        x = x + self.ffn(x=self.norm2(x))
+        return x
+        
