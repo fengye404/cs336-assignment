@@ -45,14 +45,14 @@ class Linear(torch.nn.Module):
 # 因此 embedding 中需要维护一个可训练的映射表
 # forward 就是执行映射
 class Embedding(torch.nn.Module):
-    def __init__(self, num_embeddings, embedding_dim, device=None, dtype=None):
+    def __init__(self, vocab_size: int, d_model: int, device=None, dtype=None):
         super().__init__()
         
-        # num_embeddings 词表大小
-        # embedding_dim 每个 token 的维度
+        # vocab_size 词表大小
+        # d_model 每个 token 的维度
         self.embedding = torch.nn.Parameter(
             torch.empty(
-                (num_embeddings, embedding_dim),
+                (vocab_size, d_model),
                 device = device,
                 dtype = dtype
             )
@@ -492,3 +492,39 @@ class TransformerBlock(torch.nn.Module):
         x = x + self.ffn(x=self.norm2(x))
         return x
         
+        
+# 完整的 transformer lm 的结构可以看原论文中的图，或者看 cs336 作业中的 Figure 1，图画的很清晰，就不多讲了
+class TransformerLM(torch.nn.Module):
+    def __init__(self, vocab_size: int, nums_layer: int, d_model: int, num_heads: int, d_ff: int, 
+                 theta=None, max_seq_len=None, device=None, dtype=None):
+        
+        super().__init__()
+        
+        self.token_embedding = Embedding(vocab_size=vocab_size, d_model=d_model, device=device, dtype=dtype)
+        self.layers = torch.nn.ModuleList([
+            TransformerBlock(
+                d_model=d_model,
+                num_heads=num_heads,
+                d_ff=d_ff,
+                theta=theta,
+                max_seq_len=max_seq_len,
+                device=device,
+                dtype=dtype
+            )
+            for _ in range(nums_layer)
+        ])
+        
+        self.norm = RMSNorm(d_model=d_model,device=device,dtype=dtype)
+        
+        # 注意最后是把向量映射回词表
+        self.linear = Linear(in_features=d_model, out_features=vocab_size, device=device, dtype=dtype)
+        
+    def forward(self, token_ids: torch.Tensor):
+        batch, size = token_ids.shape
+        
+        # 计算后 x.shape: (batch, size, vocab_size)
+        x = self.token_embedding(token_ids)
+        
+        # 计算后 x.shape: (batch, size, 
+        for layer in self.layers:
+            x = layer(x)
