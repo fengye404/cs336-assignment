@@ -350,6 +350,7 @@ class RotaryPositionalEmbedding(torch.nn.Module):
         
         return rotated_x
     
+# softmax 的作用就是将分数转为概率，入参 x 是分数的 tensor，dim 表示对哪个维度进行 softmax
 # softmax(v)[i] = e^(v[i]) / (e^(v[0]) + e^(v[1]) + ... + e^(v[n - 1]))
 def softmax(x: torch.Tensor, dim: int):
     # 因为 exp 是指数函数，如果 x 过大可能会导致溢出，而 softmax 实际上只关心每个 x 的差值，不关心具体的绝对值，所以先全都减掉 x 的最大值
@@ -520,11 +521,31 @@ class TransformerLM(torch.nn.Module):
         self.linear = Linear(in_features=d_model, out_features=vocab_size, device=device, dtype=dtype)
         
     def forward(self, token_ids: torch.Tensor):
-        batch, size = token_ids.shape
+        batch_size, seq_len = token_ids.shape
         
-        # 计算后 x.shape: (batch, size, vocab_size)
+        # 计算后 x.shape: (batch, size, d_model)
         x = self.token_embedding(token_ids)
         
-        # 计算后 x.shape: (batch, size, 
+        # 需要构建一个 token positions，传递到 transformer block 里面给 rope 使用
+        # 比如
+        # batch_size = 2
+        # seq_len = 4
+        # [
+        #  [0, 1, 2, 3],
+        #  [0, 1, 2, 3],
+        # ]
+        token_positions = torch.arange(seq_len, device=token_ids.device).unsqueeze(0).expand(batch_size, seq_len)
+        
+        # 计算后 x.shape: (batch, size, d_model)
         for layer in self.layers:
-            x = layer(x)
+            x = layer(x, token_positions)
+        
+        # 计算后 x.shape: (batch, size, d_model)
+        x = self.norm(x)
+        
+        # 这里要把向量通过 lm header 计算为词表分数
+        # 计算后 x.shape: (batch, size, vocab_size)
+        x = self.linear(x)
+        
+        return x
+        

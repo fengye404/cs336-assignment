@@ -391,7 +391,33 @@ def run_transformer_lm(
         Float[Tensor, "batch_size sequence_length vocab_size"]: Tensor with the predicted unnormalized
         next-word distribution for each token.
     """
-    raise NotImplementedError
+    transformer_lm = cs336_basics.model.TransformerLM(
+        vocab_size=vocab_size,
+        nums_layer=num_layers,
+        d_model=d_model,
+        num_heads=num_heads,
+        d_ff=d_ff,
+        theta=rope_theta,
+        max_seq_len=context_length
+    )
+    
+    transformer_lm.token_embedding.embedding.data = weights["token_embeddings.weight"]
+    transformer_lm.norm.weight.data = weights["ln_final.weight"] 
+    transformer_lm.linear.W.data = weights["lm_head.weight"]
+    
+    for layer_index, layer in enumerate(transformer_lm.layers):
+        prefix = f"layers.{layer_index}"
+        layer.attention.W_Q.W.data = weights[f"{prefix}.attn.q_proj.weight"]
+        layer.attention.W_K.W.data = weights[f"{prefix}.attn.k_proj.weight"]
+        layer.attention.W_V.W.data = weights[f"{prefix}.attn.v_proj.weight"]
+        layer.attention.out_proj.W.data = weights[f"{prefix}.attn.output_proj.weight"]
+        layer.norm1.weight.data = weights[f"{prefix}.ln1.weight"]
+        layer.norm2.weight.data = weights[f"{prefix}.ln2.weight"]
+        layer.ffn.w1.W.data = weights[f"{prefix}.ffn.w1.weight"]
+        layer.ffn.w2.W.data = weights[f"{prefix}.ffn.w2.weight"]
+        layer.ffn.w3.W.data = weights[f"{prefix}.ffn.w3.weight"] 
+    
+    return transformer_lm(in_indices)
 
 
 def run_rmsnorm(
