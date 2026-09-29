@@ -287,8 +287,8 @@ class RotaryPositionalEmbedding(torch.nn.Module):
         # token_positions：shape 为 (..., seq_len) 的整数位置下标；每个位置对应 x 中一个 q/k 向量所在的 token 位置。
         
         # 这里 cos 和 sin 的 shape 都是 token_positions.shape + (d_k // 2,)，得用 repeat_interleave 复制一下元素
-        cos_value = self.cos_table[token_positions].repeat_interleave(2, dim=-1)
-        sin_value = self.sin_table[token_positions].repeat_interleave(2, dim=-1)
+        cos_value = self.cos_table[token_positions].repeat_interleave(2, dim=-1).to(x.dtype)
+        sin_value = self.sin_table[token_positions].repeat_interleave(2, dim=-1).to(x.dtype)
         
         # 公式：rotated_q = q ⊙ cos_value + rotate_half(q) ⊙ sin_value
         # rotate_half：[x0, x1, x2, x3, ...] → [-x1, x0, -x3, x2, ...]
@@ -416,11 +416,11 @@ class MultiheadSelfAttention(torch.nn.Module):
         self.W_V = Linear(in_features=d_model, out_features=d_model, device=device, dtype=dtype)
         
         # 输出经过 QKV 运算后需要再过一次 Linear
-        self.out_proj = Linear(in_features=d_model, out_features=d_model, device=device)
+        self.out_proj = Linear(in_features=d_model, out_features=d_model, device=device, dtype=dtype)
         
         # 如果传入了 theta 和 max_seq_len，则处理 rope 的逻辑
         if theta is not None and max_seq_len is not None:
-            self.rope = RotaryPositionalEmbedding(theta=theta, d_k=self.head_dim, max_seq_len=max_seq_len)
+            self.rope = RotaryPositionalEmbedding(theta=theta, d_k=self.head_dim, max_seq_len=max_seq_len, device=device)
         else:
             self.rope = None
         
@@ -442,6 +442,9 @@ class MultiheadSelfAttention(torch.nn.Module):
             # token_positions shape：(batch_size, seq_len)
             if token_positions is None:
                 token_positions = torch.arange(seq_len, device=x.device).expand(batch_size, seq_len)
+            # 每条文本的位置沿 head 轴广播；一维位置可由所有文本共用。
+            if token_positions.ndim == 2:
+                token_positions = token_positions.unsqueeze(1)
             q=self.rope(q, token_positions)
             k=self.rope(k, token_positions)
         
